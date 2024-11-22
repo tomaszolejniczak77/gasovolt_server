@@ -101,4 +101,5 @@ def get_all_usage():
 if __name__ == '__main__':
     create_table()
     # Umożliwia dostęp do aplikacji z innych urządzeń w sieci
-    app.run(debug=True, host='0.0.0.0')
+    port = int(os.environ.get("PORT", 5000))  # Railway ustawia zmienną PORT
+    app.run(host="0.0.0.0", port=port)
