@@ -104,8 +104,32 @@ def get_all_usage():
     return jsonify(data)
 
 
-if __name__ == '__main__':
+@app.route('/delete_last/<resource>', methods=['DELETE'])
+def delete_last(resource):
+    table = 'electricity' if resource == 'electricity' else 'gas_usage'
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # Pobieramy ID ostatniego rekordu
+    cursor.execute(f"SELECT id FROM {table} ORDER BY id DESC LIMIT 1")
+    last_id = cursor.fetchone()
+
+    if last_id:
+        # Usuwamy rekord o najwyższym id
+        cursor.execute(f"DELETE FROM {table} WHERE id = ?", (last_id[0],))
+        conn.commit()
+        conn.close()
+        return jsonify({'message': f'Last record in {table} deleted successfully.'}), 200
+    else:
+        conn.close()
+        return jsonify({'message': f'No records to delete in {table}.'}), 404
+
+
+if __name__ == "__main__":
     create_table()
-    # Umożliwia dostęp do aplikacji z innych urządzeń w sieci
-    port = int(os.environ.get("PORT", 5000))  # Railway ustawia zmienną PORT
-    app.run(host="0.0.0.0", port=port)
+
+# if __name__ == '__main__':
+#     create_table()
+#     # Umożliwia dostęp do aplikacji z innych urządzeń w sieci
+#     port = int(os.environ.get("PORT", 5000))  # Railway ustawia zmienną PORT
+#     app.run(host="0.0.0.0", port=port)
