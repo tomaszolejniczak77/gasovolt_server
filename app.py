@@ -1,11 +1,17 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from flask_jwt_extended import JWTManager, create_access_token, create_refresh_token, jwt_required, get_jwt_identity
 import sqlite3
 import os
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
 CORS(app)
+
+# Konfiguracja JWT
+# Zmień na losowy i bezpieczny klucz!
+app.config['JWT_SECRET_KEY'] = 'your-secret-key'
+jwt = JWTManager(app)
 
 
 def get_db_connection():
@@ -26,7 +32,8 @@ def create_table():
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY,
             login TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL
+            password_hash TEXT NOT NULL,
+            is_admin INTEGER DEFAULT 0  -- 0 = false, 1 = true
         )
     ''')
 
@@ -57,12 +64,24 @@ def create_table():
     conn.close()
 
 
+# def add_is_admin_column():
+#     conn = get_db_connection()
+#     try:
+#         conn.execute('ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0')
+#         print("Column 'is_admin' added successfully.")
+#     except sqlite3.OperationalError:
+#         print("Column 'is_admin' already exists.")
+#     finally:
+#         conn.close()
+
+
 @app.route("/")
 def home():
     return "Witaj, Railway!"
 
-
 # Rejestracja użytkownika
+
+
 @app.route('/register', methods=['POST'])
 def register():
     data = request.get_json()
@@ -83,7 +102,6 @@ def register():
     return jsonify({'message': 'Rejestracja pomyślna!'}), 201
 
 
-# Logowanie użytkownika
 @app.route('/login', methods=['POST'])
 def login():
     data = request.get_json()
@@ -92,62 +110,123 @@ def login():
 
     conn = get_db_connection()
     user = conn.execute(
-        'SELECT * FROM users WHERE login = ?', (login,)).fetchone()
+        'SELECT * FROM users WHERE login = ?', (login,)
+    ).fetchone()
     conn.close()
 
     if user and check_password_hash(user['password_hash'], password):
-        return jsonify({'message': 'Logowanie zakończone sukcesem!', 'user_id': user['id']}), 200
+        # Generowanie access i refresh tokenów
+        access_token = create_access_token(
+            identity=str(user['id']), expires_delta=False)
+        refresh_token = create_refresh_token(identity=str(user['id']))
+
+        return jsonify({
+            'message': 'Logowanie zakończone sukcesem!',
+            'access_token': access_token,
+            'refresh_token': refresh_token
+        }), 200
+
     return jsonify({'message': 'Nieprawidłowy login lub hasło!'}), 401
 
+# Endpoint do odświeżania access tokena
 
-# Dodanie danych zużycia prądu
+
+@app.route('/refresh', methods=['POST'])
+@jwt_required(refresh=True)
+def refresh():
+    identity = get_jwt_identity()  # Pobiera identity (id użytkownika) z refresh_token
+    new_access_token = create_access_token(identity=identity)
+
+    return jsonify({
+        'access_token': new_access_token
+    }), 200
+
+
+@app.route('/usage/electricity', methods=['GET'])
+@jwt_required()
+def get_electricity():
+    user_id = get_jwt_identity()  # Pobieranie user_id z tokenu JWT
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        SELECT id, date, L1_usage, L2_usage
+        FROM electricity
+        WHERE user_id = ?
+        ORDER BY date ASC
+    ''', (user_id,))
+
+    records = cursor.fetchall()
+    conn.close()
+
+    # Konwersja wyników na listę słowników
+    data = [dict(record) for record in records]
+
+    return jsonify({'electricity_usage': data}), 200
+
+# Dodanie danych zużycia prądu (zabezpieczone JWT)
+
+
 @app.route('/usage/electricity', methods=['POST'])
+@jwt_required()
 def add_electricity():
+    user_id = get_jwt_identity()  # Pobieranie user_id z tokenu JWT
+    print(f"User ID: {user_id}")
     data = request.get_json()
     conn = get_db_connection()
     conn.execute('''
         INSERT INTO electricity (user_id, date, L1_usage, L2_usage) VALUES (?, ?, ?, ?)
-    ''', (data['user_id'], data['date'], data['L1_usage'], data['L2_usage']))
+    ''', (user_id, data['date'], data['L1_usage'], data['L2_usage']))
     conn.commit()
     conn.close()
     return jsonify({'message': 'Electricity data added successfully!'}), 201
 
+# Dodanie danych zużycia gazu (zabezpieczone JWT)
 
-# Dodanie danych zużycia gazu
+
+@app.route('/usage/gas', methods=['GET'])
+@jwt_required()
+def get_gas_usage():
+    user_id = get_jwt_identity()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        SELECT id, date, usage
+        FROM gas_usage
+        WHERE user_id = ?
+        ORDER BY date ASC
+    ''', (user_id,))
+
+    records = cursor.fetchall()
+    conn.close()
+
+    data = [dict(record) for record in records]
+
+    return jsonify({'gas_usage': data}), 200
+
+
 @app.route('/usage/gas', methods=['POST'])
+@jwt_required()
 def add_gas_usage():
+    user_id = get_jwt_identity()  # Pobieranie user_id z tokenu JWT
     data = request.get_json()
     conn = get_db_connection()
     conn.execute('''
         INSERT INTO gas_usage (user_id, date, usage) VALUES (?, ?, ?)
-    ''', (data['user_id'], data['date'], data['usage']))
+    ''', (user_id, data['date'], data['usage']))
     conn.commit()
     conn.close()
     return jsonify({'message': 'Gas data added successfully!'}), 201
 
 
-# Pobranie danych prądu dla użytkownika
-@app.route('/usage/electricity/<int:user_id>', methods=['GET'])
-def get_electricity_usage(user_id):
-    conn = get_db_connection()
-    usage = conn.execute(
-        'SELECT * FROM electricity WHERE user_id = ?', (user_id,)).fetchall()
-    conn.close()
-    return jsonify([dict(u) for u in usage])
+# Usunięcie ostatniego wpisu (zabezpieczone JWT)
 
 
-# Pobranie danych gazu dla użytkownika
-@app.route('/usage/gas/<int:user_id>', methods=['GET'])
-def get_gas_usage(user_id):
-    conn = get_db_connection()
-    usage = conn.execute(
-        'SELECT * FROM gas_usage WHERE user_id = ?', (user_id,)).fetchall()
-    conn.close()
-    return jsonify([dict(u) for u in usage])
-
-
-@app.route('/delete_last/<resource>/<int:user_id>', methods=['DELETE'])
-def delete_last(resource, user_id):
+@app.route('/delete_last/<resource>', methods=['DELETE'])
+@jwt_required()
+def delete_last(resource):
+    user_id = get_jwt_identity()  # Pobieranie user_id z tokenu JWT
     table = 'electricity' if resource == 'electricity' else 'gas_usage'
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -160,10 +239,31 @@ def delete_last(resource, user_id):
         cursor.execute(f"DELETE FROM {table} WHERE id = ?", (last_id[0],))
         conn.commit()
         conn.close()
-        return jsonify({'message': f'Last record in {table} for user {user_id} deleted successfully.'}), 200
+        return jsonify({'message': f'Last record in {table} deleted successfully.'}), 200
     else:
         conn.close()
-        return jsonify({'message': f'No records to delete in {table} for user {user_id}.'}), 404
+        return jsonify({'message': f'No records to delete in {table}.'}), 404
+
+
+@app.route('/user/<int:user_id>', methods=['DELETE'])
+@jwt_required()
+def delete_user(user_id):
+    current_user_id = get_jwt_identity()
+
+    conn = get_db_connection()
+    user = conn.execute('SELECT * FROM users WHERE id = ?',
+                        (current_user_id,)).fetchone()
+
+    # Sprawdzenie, czy zalogowany użytkownik to admin
+    if not user or not user['is_admin']:
+        conn.close()
+        return jsonify({'message': 'Brak uprawnień!'}), 403
+
+    # Usunięcie użytkownika
+    conn.execute('DELETE FROM users WHERE id = ?', (user_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'message': f'User {user_id} deleted successfully.'}), 200
 
 
 if __name__ == "__main__":
